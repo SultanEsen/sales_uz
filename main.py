@@ -11,44 +11,63 @@ conn = sqlite3.connect('sales_data.db', check_same_thread=False)
 
 
 def init_db():
+    # Справочник препаратов
     conn.execute('''CREATE TABLE IF NOT EXISTS product_dictionary (
-                        original_name TEXT PRIMARY KEY,
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        original_name TEXT UNIQUE,
                         unified_name TEXT,
-                        product_group TEXT)''')
+                        product_line TEXT)''')
 
+    # Сырые продажи
     conn.execute('''CREATE TABLE IF NOT EXISTS raw_sales (
-                        product_name TEXT, manufacturer TEXT, customer TEXT, 
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        product_id INTEGER, manufacturer TEXT, customer TEXT, 
                         number TEXT, sale_date DATE, amount REAL, 
-                        source TEXT, inn TEXT, region TEXT, 
-                        district TEXT, address TEXT, 
+                        source TEXT, inn TEXT, region TEXT, district TEXT, address TEXT, 
                         distributor_name TEXT, load_date TIMESTAMP)''')
 
-    conn.execute('''CREATE TABLE IF NOT EXISTS pharmacy_workplace (
-                        inn TEXT, 
-                        product_group TEXT, 
-                        workplace_id TEXT, 
-                        share REAL)''')
+    # Справочник аптек (ИНН -> Тип)
+    conn.execute('''CREATE TABLE IF NOT EXISTS pharmacies (
+                        inn TEXT PRIMARY KEY,
+                        pharmacy_type INTEGER)''')
 
-    conn.execute('''CREATE TABLE IF NOT EXISTS workplace_employee (
-                        workplace_id TEXT PRIMARY KEY, 
-                        rep_name TEXT)''')
+    # Привязка Аптеки к Рабочим Местам
+    conn.execute('''CREATE TABLE IF NOT EXISTS pharmacy_workplaces (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        inn TEXT,
+                        workplace_id TEXT)''')
+
+    # Штат (Сотрудник -> Рабочее место + Линия)
+    conn.execute('''CREATE TABLE IF NOT EXISTS employees (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        full_name TEXT,
+                        workplace_id TEXT UNIQUE,
+                        rep_line TEXT)''')
+
+    # Доли препаратов для Типа 3
+    conn.execute('''CREATE TABLE IF NOT EXISTS type3_shares (
+                        unified_name TEXT PRIMARY KEY,
+                        share_line2 REAL,
+                        share_line3 REAL)''')
     conn.commit()
 
 
 init_db()
 
-GROUPS = ["Группа 1", "Группа 2", "Группа 3"]
+LINES = ["Линия 1", "Линия 2", "Линия 3", "Другая"]
 
-# ==========================================
-# 2. ИНТЕРФЕЙС
-# ==========================================
+# Скрываем системное меню Streamlit
+st.markdown("""<style>[data-testid="stToolbar"] {visibility: hidden !important;}
+            #MainMenu {visibility: hidden !important;}
+            header {visibility: hidden !important;}</style>""", unsafe_allow_html=True)
+
 st.set_page_config(layout="wide", page_title="Аналитика продаж")
 st.title("Система управления продажами")
 
-tab1, tab2, tab3 = st.tabs(["Загрузка данных", "Отчетность", "Настройка территорий"])
+tab1, tab2, tab3 = st.tabs(["Загрузка данных", "Отчетность", "Настройка бизнес-логики"])
 
 # ==========================================
-# ВКЛАДКА 1: ЗАГРУЗКА ДАННЫХ (ЖЕСТКИЙ КОНТРОЛЬ)
+# ВКЛАДКА 1: ЗАГРУЗКА И РЕГИСТРАЦИЯ
 # ==========================================
 with tab1:
     distributor = st.selectbox("Дистрибьютор:", ["Grand", "Optima", "MegaPharm"])
@@ -65,91 +84,112 @@ with tab1:
         required = list(mapping.values())
 
         if not all(col in df.columns for col in required):
-            st.error("Ошибка структуры файла! Убедитесь, что заголовки в Excel названы точно по шаблону.")
+            st.error("Ошибка структуры файла!")
         else:
-            # Очистка ИНН от ".0" на конце (особенность Excel) и лишних пробелов
             df['inn'] = df['inn'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # --- ПРОВЕРКА 1: ПРЕПАРАТЫ ---
-            known_prods = set(pd.read_sql("SELECT original_name FROM product_dictionary", conn)['original_name'])
+            # --- БЛОК 1: ПРОВЕРКА ПРЕПАРАТОВ ---
+            prod_dict_df = pd.read_sql("SELECT id, original_name FROM product_dictionary", conn)
+            known_prods = set(prod_dict_df['original_name'])
             unknown_prods = set(df['product_name'].dropna().unique()) - known_prods
 
             if unknown_prods:
-                st.warning(f"Найдены новые препараты ({len(unknown_prods)} шт.). Сначала добавьте их в справочник!")
-                with st.form("add_new"):
-                    selected = st.selectbox("Выберите препарат для добавления:", list(unknown_prods))
+                st.warning(f"Новые препараты ({len(unknown_prods)} шт.).")
+                with st.form("add_prod", clear_on_submit=True):
+                    selected = st.selectbox("Выберите препарат:", list(unknown_prods))
                     unified = st.text_input("Унифицированное название:")
-                    prod_group = st.selectbox("Отнести к группе:", GROUPS)
-
-                    if st.form_submit_button("Добавить препарат"):
-                        conn.execute("INSERT INTO product_dictionary VALUES (?, ?, ?)",
-                                     (selected, unified, prod_group))
+                    prod_line = st.selectbox("Линия препарата:", LINES)
+                    if st.form_submit_button("Добавить в базу"):
+                        conn.execute(
+                            "INSERT INTO product_dictionary (original_name, unified_name, product_line) VALUES (?, ?, ?)",
+                            (selected, unified, prod_line))
                         conn.commit()
                         st.rerun()
             else:
-                # --- ПРОВЕРКА 2: АПТЕКИ ---
-                known_inns = set(pd.read_sql("SELECT DISTINCT inn FROM pharmacy_workplace", conn)['inn'].astype(str))
+                # --- БЛОК 2: ПРОВЕРКА И РЕГИСТРАЦИЯ АПТЕК ---
+                known_inns = set(pd.read_sql("SELECT DISTINCT inn FROM pharmacies", conn)['inn'].astype(str))
                 file_inns = set(df['inn'].dropna().unique())
                 unknown_inns = file_inns - known_inns
 
                 if unknown_inns:
-                    st.error(
-                        f"БЛОКИРОВКА ЗАГРУЗКИ: Найдено {len(unknown_inns)} новых аптек (ИНН), которых нет в базе распределения!")
-                    st.info("Перейдите во вкладку «Настройка территорий» и привяжите эти аптеки к рабочим местам.")
+                    st.error(f"БЛОКИРОВКА: Найдено {len(unknown_inns)} новых аптек (ИНН). Зарегистрируйте их ниже:")
 
-                    # Формируем красивую таблицу новых аптек для пользователя
-                    missing_df = df[df['inn'].isin(unknown_inns)][
-                        ['inn', 'customer', 'address', 'region']].drop_duplicates(subset=['inn'])
-                    st.dataframe(missing_df, use_container_width=True)
+                    # Форма регистрации новой аптеки прямо на первой вкладке
+                    missing_df = df[df['inn'].isin(unknown_inns)][['inn', 'customer', 'address']].drop_duplicates(
+                        subset=['inn'])
+                    st.dataframe(missing_df.head(5), use_container_width=True)
 
-                    # Кнопка для удобного скачивания новых аптек, чтобы внести их в Excel-шаблон
-                    buffer_inns = io.BytesIO()
-                    with pd.ExcelWriter(buffer_inns, engine='xlsxwriter') as writer:
-                        missing_df.to_excel(writer, sheet_name='Новые_Аптеки', index=False)
-                    st.download_button("📥 Скачать список новых аптек (Excel)", buffer_inns.getvalue(),
-                                       "Missing_Pharmacies.xlsx")
+                    with st.form("add_pharmacy", clear_on_submit=True):
+                        st.subheader("Регистрация аптеки")
+                        sel_inn = st.selectbox("ИНН новой аптеки:", list(unknown_inns))
+                        p_type = st.selectbox("Тип аптеки:", [1, 2, 3, 4],
+                                              help="1-Не покрыта, 2-Один сотрудник(Л1), 3-Сплит(Л2/Л3), 4-Разные линии")
+                        workplaces = st.text_input("Номера рабочих мест (через запятую):",
+                                                   help="Например: RM-101, RM-102. Для Типа 1 оставьте пустым.")
 
+                        if st.form_submit_button("Зарегистрировать аптеку"):
+                            conn.execute("INSERT INTO pharmacies (inn, pharmacy_type) VALUES (?, ?)", (sel_inn, p_type))
+                            if p_type != 1 and workplaces:
+                                wps = [w.strip() for w in workplaces.split(',') if w.strip()]
+                                for wp in wps:
+                                    conn.execute("INSERT INTO pharmacy_workplaces (inn, workplace_id) VALUES (?, ?)",
+                                                 (sel_inn, wp))
+                            conn.commit()
+                            st.success("Аптека добавлена!")
+                            st.rerun()
                 else:
-                    # --- ЕСЛИ ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ ---
-                    st.success("Все препараты и аптеки распознаны! Можно загружать данные.")
-                    if st.button("Загрузить данные в базу"):
+                    # --- БЛОК 3: ЗАГРУЗКА ---
+                    st.success("Все препараты и аптеки распознаны!")
+                    if st.button("Загрузить данные в базу продаж"):
                         df_to_db = df[required].copy()
+                        prod_map = dict(zip(prod_dict_df['original_name'], prod_dict_df['id']))
+                        df_to_db['product_id'] = df_to_db['product_name'].map(prod_map)
+                        df_to_db = df_to_db.drop(columns=['product_name'])
+
                         df_to_db['distributor_name'] = distributor
                         df_to_db['load_date'] = datetime.now()
                         df_to_db.to_sql('raw_sales', conn, if_exists='append', index=False)
-                        st.success(f"Успешно загружено {len(df_to_db)} строк!")
+                        st.success("Данные успешно загружены!")
 
 # ==========================================
-# ВКЛАДКА 3: НАСТРОЙКА ТЕРРИТОРИЙ (2 УРОВНЯ)
+# ВКЛАДКА 3: НАСТРОЙКИ (ПРЯМАЯ ПРАВКА)
 # ==========================================
 with tab3:
-    col_map1, col_map2 = st.columns(2)
+    c1, c2 = st.columns(2)
 
-    with col_map1:
-        st.subheader("1. Аптеки -> Рабочие места")
-        st.write("Колонки: `inn`, `product_group`, `workplace_id`, `share`")
-        uploaded_pharm_wp = st.file_uploader("Загрузить базу аптек", type="xlsx", key="pharm")
-        if uploaded_pharm_wp and st.button("Обновить базу аптек"):
-            df_pharm = pd.read_excel(uploaded_pharm_wp)
-            # Очистка ИНН при загрузке базы
-            df_pharm['inn'] = df_pharm['inn'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    with c1:
+        st.subheader("Штат сотрудников (Прямая правка)")
+        with st.form("add_emp", clear_on_submit=True):
+            e_name = st.text_input("ФИО сотрудника")
+            e_wp = st.text_input("Номер рабочего места (например, RM-101)")
+            e_line = st.selectbox("Линия", LINES)
+            if st.form_submit_button("Добавить / Обновить сотрудника"):
+                conn.execute("INSERT OR REPLACE INTO employees (full_name, workplace_id, rep_line) VALUES (?, ?, ?)",
+                             (e_name, e_wp, e_line))
+                conn.commit()
+                st.success("Сотрудник сохранен!")
+        st.dataframe(pd.read_sql("SELECT full_name, workplace_id, rep_line FROM employees", conn),
+                     use_container_width=True)
 
-            conn.execute("DELETE FROM pharmacy_workplace")
-            df_pharm.to_sql('pharmacy_workplace', conn, if_exists='append', index=False)
-            st.success("Связи аптек и рабочих мест обновлены!")
-
-    with col_map2:
-        st.subheader("2. Рабочие места -> Сотрудники")
-        st.write("Колонки: `workplace_id`, `rep_name`")
-        uploaded_wp_emp = st.file_uploader("Загрузить список сотрудников", type="xlsx", key="emp")
-        if uploaded_wp_emp and st.button("Обновить штат сотрудников"):
-            df_emp = pd.read_excel(uploaded_wp_emp)
-            conn.execute("DELETE FROM workplace_employee")
-            df_emp.to_sql('workplace_employee', conn, if_exists='append', index=False)
-            st.success("Штат сотрудников обновлен!")
+    with c2:
+        st.subheader("Пропорции Тип 3 (Прямая правка)")
+        with st.form("add_share", clear_on_submit=True):
+            # Берем только известные унифицированные имена
+            unified_names = pd.read_sql("SELECT DISTINCT unified_name FROM product_dictionary", conn)[
+                'unified_name'].tolist()
+            s_name = st.selectbox("Препарат", unified_names if unified_names else ["Пусто"])
+            s_l2 = st.number_input("Доля Линии 2 (0.0 - 1.0)", value=0.5, step=0.1)
+            s_l3 = st.number_input("Доля Линии 3 (0.0 - 1.0)", value=0.5, step=0.1)
+            if st.form_submit_button("Сохранить пропорцию"):
+                conn.execute(
+                    "INSERT OR REPLACE INTO type3_shares (unified_name, share_line2, share_line3) VALUES (?, ?, ?)",
+                    (s_name, s_l2, s_l3))
+                conn.commit()
+                st.success("Пропорция сохранена!")
+        st.dataframe(pd.read_sql("SELECT * FROM type3_shares", conn), use_container_width=True)
 
 # ==========================================
-# ВКЛАДКА 2: ОТЧЕТНОСТЬ
+# ВКЛАДКА 2: РАСПРЕДЕЛЕНИЕ И ОТЧЕТНОСТЬ
 # ==========================================
 with tab2:
     all_dists = [row[0] for row in conn.execute("SELECT DISTINCT distributor_name FROM raw_sales").fetchall()]
@@ -168,28 +208,95 @@ with tab2:
 
         query = f"""
         SELECT 
-            rs.sale_date,
-            pd.unified_name,
-            pd.product_group,
-            IFNULL(pw.workplace_id, 'Не привязано') as workplace_id,
-            IFNULL(we.rep_name, 'Вакантно') as rep_name,
-            (rs.amount * IFNULL(pw.share, 1.0)) as distributed_amount
+            rs.sale_date, rs.amount, rs.inn,
+            pd.unified_name, pd.product_line,
+            ph.pharmacy_type
         FROM raw_sales rs
-        LEFT JOIN product_dictionary pd ON rs.product_name = pd.original_name
-        LEFT JOIN pharmacy_workplace pw ON rs.inn = pw.inn AND pd.product_group = pw.product_group
-        LEFT JOIN workplace_employee we ON pw.workplace_id = we.workplace_id
+        JOIN product_dictionary pd ON rs.product_id = pd.id
+        JOIN pharmacies ph ON rs.inn = ph.inn
         WHERE rs.distributor_name IN ({dist_placeholders})
         """
+        df_raw = pd.read_sql(query, conn, params=tuple(selected_dists))
 
-        df_rep = pd.read_sql(query, conn, params=tuple(selected_dists))
+        if not df_raw.empty:
+            df_raw['period'] = pd.to_datetime(df_raw['sale_date']).dt.strftime('%Y-%m')
+            df_raw = df_raw[df_raw['period'].isin(selected_periods)]
 
-        if not df_rep.empty:
-            df_rep['period'] = pd.to_datetime(df_rep['sale_date']).dt.strftime('%Y-%m')
-            df_rep = df_rep[df_rep['period'].isin(selected_periods)]
+            if not df_raw.empty:
+                # Словари для логики
+                df_wps = pd.read_sql("""
+                    SELECT pw.inn, pw.workplace_id, e.full_name, e.rep_line 
+                    FROM pharmacy_workplaces pw
+                    LEFT JOIN employees e ON pw.workplace_id = e.workplace_id
+                """, conn)
 
-            if not df_rep.empty:
-                pivot = df_rep.pivot_table(
-                    index=['rep_name', 'workplace_id', 'product_group', 'unified_name'],
+                # Группируем по ИНН: { 'INN': [{'wp': 'RM-1', 'name': 'Иванов', 'line': 'Линия 1'}, ...] }
+                pharm_wps_dict = {}
+                for inn, group in df_wps.groupby('inn'):
+                    pharm_wps_dict[inn] = group.to_dict('records')
+
+                df_shares = pd.read_sql("SELECT * FROM type3_shares", conn)
+                shares_dict = df_shares.set_index('unified_name').to_dict('index')
+
+                distributed_data = []
+
+                for _, row in df_raw.iterrows():
+                    period = row['period']
+                    uname = row['unified_name']
+                    pline = row['product_line']
+                    amt = row['amount']
+                    ptype = row['pharmacy_type']
+                    inn = row['inn']
+
+                    wps = pharm_wps_dict.get(inn, [])
+
+
+                    # Функция добавления результата
+                    def add_record(wp_id, name, amount):
+                        distributed_data.append([period, uname, pline, wp_id, name, amount])
+
+
+                    # ТИП 1
+                    if ptype == 1 or not wps:
+                        add_record('Не покрыт', 'Не покрыт', amt)
+                        continue
+
+                    # ТИП 2 (Линия 1, всё идет на одно рабочее место)
+                    if ptype == 2:
+                        wp = wps[0]  # Берем единственное рабочее место
+                        add_record(wp['workplace_id'], wp['full_name'], amt)
+
+                    # ТИП 3 (Сплит Линия 2 и Линия 3)
+                    elif ptype == 3:
+                        wp_l2 = next((w for w in wps if w['rep_line'] == 'Линия 2'), None)
+                        wp_l3 = next((w for w in wps if w['rep_line'] == 'Линия 3'), None)
+
+                        if pline == 'Линия 2' and wp_l2:
+                            add_record(wp_l2['workplace_id'], wp_l2['full_name'], amt)
+                        elif pline == 'Линия 3' and wp_l3:
+                            add_record(wp_l3['workplace_id'], wp_l3['full_name'], amt)
+                        else:
+                            sh = shares_dict.get(uname, {'share_line2': 0.5, 'share_line3': 0.5})
+                            if wp_l2: add_record(wp_l2['workplace_id'], wp_l2['full_name'],
+                                                 amt * sh.get('share_line2', 0.5))
+                            if wp_l3: add_record(wp_l3['workplace_id'], wp_l3['full_name'],
+                                                 amt * sh.get('share_line3', 0.5))
+
+                    # ТИП 4 (Строгое совпадение линий)
+                    elif ptype == 4:
+                        direct_wp = next((w for w in wps if w['rep_line'] == pline), None)
+                        if direct_wp:
+                            add_record(direct_wp['workplace_id'], direct_wp['full_name'], amt)
+                        else:
+                            add_record('Не покрыт (Нет линии)', 'Не покрыт', amt)
+
+                # Сводная таблица
+                df_dist = pd.DataFrame(distributed_data,
+                                       columns=['period', 'unified_name', 'product_line', 'workplace_id', 'rep_name',
+                                                'distributed_amount'])
+
+                pivot = df_dist.pivot_table(
+                    index=['workplace_id', 'rep_name', 'product_line', 'unified_name'],
                     columns='period',
                     values='distributed_amount',
                     aggfunc='sum',
@@ -201,7 +308,6 @@ with tab2:
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     pivot.to_excel(writer, sheet_name='Отчет')
-
                 st.download_button("📥 Скачать отчет (Excel)", buffer.getvalue(), "Sales_Distributed.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
