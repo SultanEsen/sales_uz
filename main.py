@@ -270,7 +270,8 @@ else:
         col_left, col_right = st.columns([1, 2])
 
         with col_left:
-            with st.container(height=650, border=False):
+            # Уменьшили высоту до 550, чтобы панель точно влезла на экран любого ноутбука
+            with st.container(height=550, border=True):
                 target_period = st.selectbox("Выберите период (ГГГГ-ММ):", all_target_periods, index=default_idx)
 
                 st.markdown("**(Опционально) Быстрый старт:**")
@@ -355,16 +356,132 @@ else:
                                 st.rerun()
 
         with col_right:
-            st.write(f"**Текущая матрица за {target_period}:**")
-            df_matrix = pd.read_sql(f"""
-                SELECT t.inn as 'ИНН', p.pharmacy_name as 'Название', t.pharmacy_type as 'Тип', IFNULL(GROUP_CONCAT(w.workplace_id, ', '), 'Не покрыт') as 'Рабочие места'
-                FROM monthly_pharmacy_type t
-                LEFT JOIN pharmacies p ON t.inn = p.inn
-                LEFT JOIN monthly_pharmacy_workplaces w ON t.inn = w.inn AND t.period = w.period
-                WHERE t.period = '{target_period}'
-                GROUP BY t.inn
-            """, conn)
-            st.dataframe(df_matrix, use_container_width=True, hide_index=True, height=650)
+            # ПРАВАЯ ЧАСТЬ: помещаем таблицу в точно такой же жесткий контейнер высотой 550.
+            with st.container(height=550, border=True):
+                st.write(f"**Текущая матрица за {target_period}:**")
+                df_matrix = pd.read_sql(f"""
+                    SELECT t.inn as 'ИНН', p.pharmacy_name as 'Название', t.pharmacy_type as 'Тип', IFNULL(GROUP_CONCAT(w.workplace_id, ', '), 'Не покрыт') as 'Рабочие места'
+                    FROM monthly_pharmacy_type t
+                    LEFT JOIN pharmacies p ON t.inn = p.inn
+                    LEFT JOIN monthly_pharmacy_workplaces w ON t.inn = w.inn AND t.period = w.period
+                    WHERE t.period = '{target_period}'
+                    GROUP BY t.inn
+                """, conn)
+
+                # ВАЖНО: Мы убрали параметр height отсюда. Теперь прокруткой управляет st.container
+                st.dataframe(df_matrix, use_container_width=True, hide_index=True)
+    # with tab4:
+    #     st.subheader("Управление территориями по месяцам (Прямая правка)")
+    #
+    #     existing_periods = [row[0] for row in
+    #                         conn.execute("SELECT DISTINCT period FROM monthly_pharmacy_type").fetchall()]
+    #     sales_periods = [row[0] for row in conn.execute("SELECT DISTINCT period FROM raw_sales").fetchall()]
+    #     base_dates = pd.date_range(start=datetime.now() - pd.DateOffset(months=12), periods=24, freq='MS').strftime(
+    #         '%Y-%m').tolist()
+    #
+    #     all_target_periods = sorted(list(set(existing_periods + sales_periods + base_dates)), reverse=True)
+    #     curr_month = datetime.now().strftime('%Y-%m')
+    #     default_idx = all_target_periods.index(curr_month) if curr_month in all_target_periods else 0
+    #
+    #     col_left, col_right = st.columns([1, 2])
+    #
+    #     with col_left:
+    #         with st.container(height=650, border=False):
+    #             target_period = st.selectbox("Выберите период (ГГГГ-ММ):", all_target_periods, index=default_idx)
+    #
+    #             st.markdown("**(Опционально) Быстрый старт:**")
+    #             try:
+    #                 prev_period = (pd.to_datetime(target_period + '-01') - pd.DateOffset(months=1)).strftime('%Y-%m')
+    #                 if st.button(f"Скопировать привязки из {prev_period} в {target_period}"):
+    #                     curr_count = conn.execute("SELECT COUNT(*) FROM monthly_pharmacy_type WHERE period=?",
+    #                                               (target_period,)).fetchone()[0]
+    #                     if curr_count > 0:
+    #                         st.warning("В текущем месяце уже есть данные. Очистите их или редактируйте вручную.")
+    #                     else:
+    #                         conn.execute(
+    #                             "INSERT INTO monthly_pharmacy_type (inn, period, pharmacy_type) SELECT inn, ?, pharmacy_type FROM monthly_pharmacy_type WHERE period=?",
+    #                             (target_period, prev_period))
+    #                         conn.execute(
+    #                             "INSERT INTO monthly_pharmacy_workplaces (inn, period, workplace_id) SELECT inn, ?, workplace_id FROM monthly_pharmacy_workplaces WHERE period=?",
+    #                             (target_period, prev_period))
+    #                         conn.commit()
+    #                         st.success(f"Данные из {prev_period} успешно перенесены!")
+    #                         st.rerun()
+    #             except Exception:
+    #                 st.warning("Ошибка обработки периода.")
+    #
+    #             st.write("---")
+    #             st.write(f"**Настроить аптеку на {target_period}**")
+    #
+    #             search_query = st.text_input("🔍 Поиск аптеки (введите ИНН или название):",
+    #                                          help="Начните вводить текст для фильтрации списка")
+    #             pharms_df = pd.read_sql("SELECT inn, IFNULL(pharmacy_name, 'Без названия') as name FROM pharmacies",
+    #                                     conn)
+    #             all_pharm_options = [f"{row['inn']} | {row['name']}" for _, row in pharms_df.iterrows()]
+    #
+    #             if search_query:
+    #                 pharm_options = [p for p in all_pharm_options if search_query.lower() in p.lower()]
+    #             else:
+    #                 pharm_options = all_pharm_options
+    #
+    #             avail_wps = pd.read_sql("SELECT workplace_id FROM workplaces", conn)['workplace_id'].tolist()
+    #
+    #             with st.form("edit_monthly_bind", clear_on_submit=True):
+    #                 sel_pharm = st.selectbox("Выберите аптеку:",
+    #                                          pharm_options if pharm_options else ["Ничего не найдено"])
+    #                 p_type = st.selectbox("Тип аптеки:", [1, 2, 3, 4])
+    #                 workplaces = st.multiselect("Рабочие места:", avail_wps)
+    #
+    #                 if st.form_submit_button("Сохранить привязку"):
+    #                     if pharm_options and sel_pharm != "Ничего не найдено":
+    #                         inn = sel_pharm.split(" | ")[0]
+    #                         p_type_val = int(p_type)
+    #                         has_error = False
+    #
+    #                         if p_type_val == 1 and len(workplaces) > 0:
+    #                             st.error("Ошибка: Аптека Тип 1 не может быть привязана к рабочим местам!")
+    #                             has_error = True
+    #                         elif p_type_val == 2:
+    #                             if len(workplaces) != 1:
+    #                                 st.error("Ошибка: К аптеке Тип 2 должно быть привязано ровно 1 рабочее место!")
+    #                                 has_error = True
+    #                             else:
+    #                                 wp_line = conn.execute("SELECT rep_line FROM workplaces WHERE workplace_id = ?",
+    #                                                        (workplaces[0],)).fetchone()[0]
+    #                                 if wp_line != 'Линия 1':
+    #                                     st.error(
+    #                                         f"Ошибка: Аптека Тип 2 привязывается только к РМ из 'Линия 1' (выбрано: {wp_line})!")
+    #                                     has_error = True
+    #
+    #                         if not has_error:
+    #                             conn.execute("DELETE FROM monthly_pharmacy_type WHERE inn = ? AND period = ?",
+    #                                          (inn, target_period))
+    #                             conn.execute("DELETE FROM monthly_pharmacy_workplaces WHERE inn = ? AND period = ?",
+    #                                          (inn, target_period))
+    #
+    #                             conn.execute(
+    #                                 "INSERT INTO monthly_pharmacy_type (inn, period, pharmacy_type) VALUES (?, ?, ?)",
+    #                                 (inn, target_period, p_type_val))
+    #                             for wp in workplaces:
+    #                                 conn.execute(
+    #                                     "INSERT INTO monthly_pharmacy_workplaces (inn, period, workplace_id) VALUES (?, ?, ?)",
+    #                                     (inn, target_period, wp))
+    #                             conn.commit()
+    #                             st.success("Привязка для аптеки обновлена!")
+    #                             st.rerun()
+    #
+    #     with col_right:
+    #         st.write(f"**Текущая матрица за {target_period}:**")
+    #         df_matrix = pd.read_sql(f"""
+    #             SELECT t.inn as 'ИНН', p.pharmacy_name as 'Название', t.pharmacy_type as 'Тип', IFNULL(GROUP_CONCAT(w.workplace_id, ', '), 'Не покрыт') as 'Рабочие места'
+    #             FROM monthly_pharmacy_type t
+    #             LEFT JOIN pharmacies p ON t.inn = p.inn
+    #             LEFT JOIN monthly_pharmacy_workplaces w ON t.inn = w.inn AND t.period = w.period
+    #             WHERE t.period = '{target_period}'
+    #             GROUP BY t.inn
+    #         """, conn)
+    #         st.dataframe(df_matrix, use_container_width=True, hide_index=True, height=650)
+
 
     # === ВКЛАДКА 2: РАСПРЕДЕЛЕНИЕ И ОТЧЕТНОСТЬ ===
     with tab2:
