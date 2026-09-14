@@ -122,105 +122,130 @@ else:
             if not all(col in df.columns for col in required):
                 st.error("Ошибка структуры файла! Проверьте названия колонок.")
             else:
-                df['inn'] = df['inn'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                df['period'] = pd.to_datetime(df['sale_date']).dt.strftime('%Y-%m')
-                file_periods = df['period'].unique().tolist()
+                # 1. Очистка и заполнение пустот
+                df['inn'] = df['inn'].fillna('').astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
 
-                prod_dict = pd.read_sql("SELECT original_name FROM product_dictionary", conn)['original_name'].tolist()
-                unknown_prods = set(df['product_name'].dropna().unique()) - set(prod_dict)
+                # 2. Проверка ИНН: строго 9 цифр (это также отсекает пустые поля)
+                invalid_mask = ~df['inn'].str.fullmatch(r'^\d{9}$')
 
-                dist_dict = pd.read_sql("SELECT original_name FROM district_dictionary", conn)['original_name'].tolist()
-                unknown_dists = set(df['district'].dropna().unique()) - set(dist_dict)
+                if invalid_mask.any():
+                    # Индекс Pandas начинается с 0, а данные в Excel - со строки 2
+                    invalid_rows = (df.index[invalid_mask] + 2).tolist()
 
-                known_inns = pd.read_sql("SELECT inn FROM pharmacies", conn)['inn'].tolist()
-                unknown_inns = set(df['inn'].dropna().unique()) - set(known_inns)
+                    if len(invalid_rows) > 10:
+                        rows_str = ", ".join(map(str, invalid_rows[:10])) + f" ... и еще {len(invalid_rows) - 10}"
+                    else:
+                        rows_str = ", ".join(map(str, invalid_rows))
 
-                if unknown_prods:
-                    st.warning(f"Найдено {len(unknown_prods)} новых препаратов.")
-                    with st.form("add_prod", clear_on_submit=True):
-                        selected = st.selectbox("Препарат:", list(unknown_prods))
-                        unified = st.text_input("Унифицированное название:")
-                        prod_line = st.selectbox("Линия препарата:", LINES)
-                        if st.form_submit_button("Добавить"):
-                            conn.execute(
-                                "INSERT INTO product_dictionary (original_name, unified_name, product_line) VALUES (?, ?, ?)",
-                                (selected, unified, prod_line))
-                            conn.commit()
-                            st.rerun()
+                    st.error("❌ **Критическая ошибка файла: некорректный ИНН**")
+                    st.error(
+                        f"ИНН должен состоять ровно из 9 цифр, пустые ячейки запрещены. Проверьте строки в Excel: **{rows_str}**")
+                    st.warning("Загрузка остановлена. Исправьте файл и загрузите его заново.")
 
-                elif unknown_dists:
-                    st.warning(f"Найдено {len(unknown_dists)} новых городов/районов.")
-                    with st.form("add_dist", clear_on_submit=True):
-                        selected_dist = st.selectbox("Город/Район из файла:", list(unknown_dists))
-                        unified_dist = st.text_input("Унифицированное название района:")
-                        if st.form_submit_button("Добавить в справочник"):
-                            conn.execute("INSERT INTO district_dictionary (original_name, unified_name) VALUES (?, ?)",
-                                         (selected_dist, unified_dist))
-                            conn.commit()
-                            st.rerun()
-
-                elif unknown_inns:
-                    st.error(f"БЛОКИРОВКА: Найдено {len(unknown_inns)} новых аптек.")
-                    missing_df = df[df['inn'].isin(unknown_inns)][['inn', 'customer', 'address']].drop_duplicates('inn')
-                    st.dataframe(missing_df.head(5), use_container_width=True)
-
-                    avail_wps = pd.read_sql("SELECT workplace_id FROM workplaces", conn)['workplace_id'].tolist()
-
-                    with st.form("add_pharmacy"):
-                        st.write(f"Регистрация (Привязка сработает на месяцы из файла: {', '.join(file_periods)})")
-                        sel_inn = st.selectbox("ИНН новой аптеки:", list(unknown_inns))
-                        ph_name = st.text_input("Название аптеки:",
-                                                value=missing_df[missing_df['inn'] == sel_inn]['customer'].iloc[
-                                                    0] if not missing_df.empty else "")
-                        p_type = st.selectbox("Тип аптеки:", [1, 2, 3, 4])
-                        workplaces = st.multiselect("Рабочие места:", avail_wps)
-
-                        if st.form_submit_button("Зарегистрировать аптеку"):
-                            p_type_val = int(p_type)
-                            has_error = False
-
-                            if p_type_val == 1 and len(workplaces) > 0:
-                                st.error("Аптека Тип 1 не может быть привязана к рабочему месту!")
-                                has_error = True
-                            elif p_type_val == 2:
-                                if len(workplaces) != 1:
-                                    st.error("Аптека Тип 2 обязана иметь ровно 1 привязанное рабочее место!")
-                                    has_error = True
-                                else:
-                                    wp_line = conn.execute("SELECT rep_line FROM workplaces WHERE workplace_id = ?",
-                                                           (workplaces[0],)).fetchone()[0]
-                                    if wp_line != 'Линия 1':
-                                        st.error(
-                                            f"Ошибка: Аптека Тип 2 привязывается только к РМ из 'Линия 1' (выбрано: {wp_line})!")
-                                        has_error = True
-
-                            if not has_error:
-                                conn.execute("INSERT INTO pharmacies (inn, pharmacy_name) VALUES (?, ?)",
-                                             (sel_inn, ph_name))
-                                for p in file_periods:
-                                    conn.execute(
-                                        "INSERT INTO monthly_pharmacy_type (inn, period, pharmacy_type) VALUES (?, ?, ?)",
-                                        (sel_inn, p, p_type_val))
-                                    for wp in workplaces:
-                                        conn.execute(
-                                            "INSERT INTO monthly_pharmacy_workplaces (inn, period, workplace_id) VALUES (?, ?, ?)",
-                                            (sel_inn, p, wp))
-                                conn.commit()
-                                st.success("Успешно!")
-                                st.rerun()
                 else:
-                    st.success("Проверки пройдены!")
-                    if st.button("Загрузить данные"):
-                        df_to_db = df[required + ['period']].copy()
-                        prod_map = dict(
-                            zip(pd.read_sql("SELECT original_name, id FROM product_dictionary", conn).values[:, 0],
-                                pd.read_sql("SELECT original_name, id FROM product_dictionary", conn).values[:, 1]))
-                        df_to_db['product_id'] = df_to_db['product_name'].map(prod_map)
-                        df_to_db = df_to_db.drop(columns=['product_name'])
-                        df_to_db['distributor_name'] = distributor
-                        df_to_db['load_date'] = datetime.now()
-                        df_to_db.to_sql('raw_sales', conn, if_exists='append', index=False)
-                        st.success("Загружено успешно!")
+                    # 3. Если ИНН в порядке, продолжаем обычную обработку
+                    df['period'] = pd.to_datetime(df['sale_date']).dt.strftime('%Y-%m')
+                    file_periods = df['period'].unique().tolist()
+
+                    prod_dict = pd.read_sql("SELECT original_name FROM product_dictionary", conn)[
+                        'original_name'].tolist()
+                    unknown_prods = set(df['product_name'].dropna().unique()) - set(prod_dict)
+
+                    dist_dict = pd.read_sql("SELECT original_name FROM district_dictionary", conn)[
+                        'original_name'].tolist()
+                    unknown_dists = set(df['district'].dropna().unique()) - set(dist_dict)
+
+                    known_inns = pd.read_sql("SELECT inn FROM pharmacies", conn)['inn'].tolist()
+                    unknown_inns = set(df['inn'].dropna().unique()) - set(known_inns)
+
+                    if unknown_prods:
+                        st.warning(f"Найдено {len(unknown_prods)} новых препаратов.")
+                        with st.form("add_prod", clear_on_submit=True):
+                            selected = st.selectbox("Препарат:", list(unknown_prods))
+                            unified = st.text_input("Унифицированное название:")
+                            prod_line = st.selectbox("Линия препарата:", LINES)
+                            if st.form_submit_button("Добавить"):
+                                conn.execute(
+                                    "INSERT INTO product_dictionary (original_name, unified_name, product_line) VALUES (?, ?, ?)",
+                                    (selected, unified, prod_line))
+                                conn.commit()
+                                st.rerun()
+
+                    elif unknown_dists:
+                        st.warning(f"Найдено {len(unknown_dists)} новых городов/районов.")
+                        with st.form("add_dist", clear_on_submit=True):
+                            selected_dist = st.selectbox("Город/Район из файла:", list(unknown_dists))
+                            unified_dist = st.text_input("Унифицированное название района:")
+                            if st.form_submit_button("Добавить в справочник"):
+                                conn.execute(
+                                    "INSERT INTO district_dictionary (original_name, unified_name) VALUES (?, ?)",
+                                    (selected_dist, unified_dist))
+                                conn.commit()
+                                st.rerun()
+
+                    elif unknown_inns:
+                        st.error(f"БЛОКИРОВКА: Найдено {len(unknown_inns)} новых аптек.")
+                        missing_df = df[df['inn'].isin(unknown_inns)][['inn', 'customer', 'address']].drop_duplicates(
+                            'inn')
+                        st.dataframe(missing_df.head(5), use_container_width=True)
+
+                        avail_wps = pd.read_sql("SELECT workplace_id FROM workplaces", conn)['workplace_id'].tolist()
+
+                        with st.form("add_pharmacy"):
+                            st.write(f"Регистрация (Привязка сработает на месяцы из файла: {', '.join(file_periods)})")
+                            sel_inn = st.selectbox("ИНН новой аптеки:", list(unknown_inns))
+                            ph_name = st.text_input("Название аптеки:",
+                                                    value=missing_df[missing_df['inn'] == sel_inn]['customer'].iloc[
+                                                        0] if not missing_df.empty else "")
+                            p_type = st.selectbox("Тип аптеки:", [1, 2, 3, 4])
+                            workplaces = st.multiselect("Рабочие места:", avail_wps)
+
+                            if st.form_submit_button("Зарегистрировать аптеку"):
+                                p_type_val = int(p_type)
+                                has_error = False
+
+                                if p_type_val == 1 and len(workplaces) > 0:
+                                    st.error("Аптека Тип 1 не может быть привязана к рабочему месту!")
+                                    has_error = True
+                                elif p_type_val == 2:
+                                    if len(workplaces) != 1:
+                                        st.error("Аптека Тип 2 обязана иметь ровно 1 привязанное рабочее место!")
+                                        has_error = True
+                                    else:
+                                        wp_line = conn.execute("SELECT rep_line FROM workplaces WHERE workplace_id = ?",
+                                                               (workplaces[0],)).fetchone()[0]
+                                        if wp_line != 'Линия 1':
+                                            st.error(
+                                                f"Ошибка: Аптека Тип 2 привязывается только к РМ из 'Линия 1' (выбрано: {wp_line})!")
+                                            has_error = True
+
+                                if not has_error:
+                                    conn.execute("INSERT INTO pharmacies (inn, pharmacy_name) VALUES (?, ?)",
+                                                 (sel_inn, ph_name))
+                                    for p in file_periods:
+                                        conn.execute(
+                                            "INSERT INTO monthly_pharmacy_type (inn, period, pharmacy_type) VALUES (?, ?, ?)",
+                                            (sel_inn, p, p_type_val))
+                                        for wp in workplaces:
+                                            conn.execute(
+                                                "INSERT INTO monthly_pharmacy_workplaces (inn, period, workplace_id) VALUES (?, ?, ?)",
+                                                (sel_inn, p, wp))
+                                    conn.commit()
+                                    st.success("Успешно!")
+                                    st.rerun()
+                    else:
+                        st.success("Проверки пройдены!")
+                        if st.button("Загрузить данные"):
+                            df_to_db = df[required + ['period']].copy()
+                            prod_map = dict(
+                                zip(pd.read_sql("SELECT original_name, id FROM product_dictionary", conn).values[:, 0],
+                                    pd.read_sql("SELECT original_name, id FROM product_dictionary", conn).values[:, 1]))
+                            df_to_db['product_id'] = df_to_db['product_name'].map(prod_map)
+                            df_to_db = df_to_db.drop(columns=['product_name'])
+                            df_to_db['distributor_name'] = distributor
+                            df_to_db['load_date'] = datetime.now()
+                            df_to_db.to_sql('raw_sales', conn, if_exists='append', index=False)
+                            st.success("Загружено успешно!")
 
     # === ВКЛАДКА 3: БАЗОВЫЕ НАСТРОЙКИ ===
     with tab3:
