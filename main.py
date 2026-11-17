@@ -105,7 +105,7 @@ if not st.session_state.authenticated:
 else:
     col_title, col_logout = st.columns([5, 1])
     with col_title:
-        st.title("Система управления продажами")
+        st.title("Система управления продажами_V1.0")
     with col_logout:
         st.write(f"👤 Пользователь: **{st.session_state.user}**")
         if st.button("🚪 Выйти", use_container_width=True):
@@ -348,22 +348,34 @@ else:
 
                                         st.success("Загружено успешно!")
                                         st.rerun()
+    # === ВКЛАДКА 2: РАСПРЕДЕЛЕНИЕ И ОТЧЕТНОСТЬ ===
     with tab2:
         if conn.execute("SELECT COUNT(*) FROM raw_sales").fetchone()[0] == 0:
             st.warning("В базе продаж пока нет данных.")
         else:
             df_dates = pd.read_sql("SELECT period FROM raw_sales", conn)
             all_periods = sorted(df_dates['period'].unique().tolist(), reverse=True)
-            all_wps = [row[0] for row in conn.execute("SELECT workplace_id FROM workplaces").fetchall()] + ['Не покрыт',
-                                                                                                            'Без линии',
-                                                                                                            'empty WP']
+            all_wps = [row[0] for row in
+                       conn.execute("SELECT workplace_id FROM workplaces").fetchall()] + ['Не покрыт',
+                                                                                          'Без линии',
+                                                                                          'empty WP']
 
-            c1, c2 = st.columns(2)
+            # ДОБАВЛЕНО: Выгружаем список дистрибьюторов, по которым есть продажи
+            all_dists_tab2 = sorted([row[0] for row in conn.execute(
+                "SELECT DISTINCT distributor_name FROM raw_sales WHERE distributor_name IS NOT NULL").fetchall()])
+
+            # ДОБАВЛЕНО: Разбиваем фильтры на 3 колонки
+            c1, c2, c3 = st.columns(3)
             selected_periods = c1.multiselect("Фильтр по месяцам:", all_periods, default=all_periods)
-            selected_wps = c2.multiselect("Фильтр по рабочим местам:", all_wps, default=all_wps)
+            selected_dists_tab2 = c2.multiselect("Фильтр по дистрибьюторам:", all_dists_tab2,
+                                                 default=all_dists_tab2)
+            selected_wps = c3.multiselect("Фильтр по рабочим местам:", all_wps, default=all_wps)
 
-            if selected_periods:
+            # Проверяем, что выбраны и месяцы, и дистрибьюторы
+            if selected_periods and selected_dists_tab2:
                 p_placeholders = ', '.join(['?'] * len(selected_periods))
+                d_placeholders = ', '.join(['?'] * len(selected_dists_tab2))
+
                 query = f"""
                 SELECT 
                     rs.period, rs.amount, rs.inn,
@@ -377,8 +389,11 @@ else:
                 LEFT JOIN monthly_pharmacy_type mpt ON rs.inn = mpt.inn AND rs.period = mpt.period
                 LEFT JOIN pharmacies ph ON rs.inn = ph.inn
                 WHERE rs.period IN ({p_placeholders})
+                  AND rs.distributor_name IN ({d_placeholders}) 
                 """
-                df_raw = pd.read_sql(query, conn, params=tuple(selected_periods))
+                # Передаем параметры обоих фильтров в запрос
+                params = tuple(selected_periods) + tuple(selected_dists_tab2)
+                df_raw = pd.read_sql(query, conn, params=params)
 
                 if not df_raw.empty:
                     df_wps = pd.read_sql(f"""
@@ -966,8 +981,20 @@ else:
                 with c1:
                     st.write("**📈 Динамика продаж по месяцам**")
                     if not df_filtered.empty:
-                        dyn_df = df_filtered.groupby('period')['amount'].sum().reset_index().set_index('period')
-                        st.line_chart(dyn_df, use_container_width=True)
+                        dyn_df = df_filtered.groupby('period')['amount'].sum().reset_index()
+
+                        # ДОБАВЛЕНО: Плавный график через встроенную библиотеку Altair
+                        import altair as alt
+
+                        chart = alt.Chart(dyn_df).mark_line(
+                            interpolate='monotone',  # Делает линии плавными (сглаженными)
+                            point=True,  # Оставляет точки для точных значений
+                            strokeWidth=3  # Делает линию чуть толще и красивее
+                        ).encode(
+                            x=alt.X('period', title=''),
+                            y=alt.Y('amount', title='')
+                        )
+                        st.altair_chart(chart, use_container_width=True)
                     else:
                         st.info("Нет данных")
 
