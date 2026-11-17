@@ -105,7 +105,7 @@ if not st.session_state.authenticated:
 else:
     col_title, col_logout = st.columns([5, 1])
     with col_title:
-        st.title("Система управления продажами_V1.0")
+        st.title("Система управления продажами_V1.1")
     with col_logout:
         st.write(f"👤 Пользователь: **{st.session_state.user}**")
         if st.button("🚪 Выйти", use_container_width=True):
@@ -355,30 +355,28 @@ else:
         else:
             df_dates = pd.read_sql("SELECT period FROM raw_sales", conn)
             all_periods = sorted(df_dates['period'].unique().tolist(), reverse=True)
-            all_wps = [row[0] for row in
-                       conn.execute("SELECT workplace_id FROM workplaces").fetchall()] + ['Не покрыт',
-                                                                                          'Без линии',
-                                                                                          'empty WP']
+            all_wps = [row[0] for row in conn.execute("SELECT workplace_id FROM workplaces").fetchall()] + [
+                'Не покрыт', 'Без линии', 'empty WP']
 
-            # ДОБАВЛЕНО: Выгружаем список дистрибьюторов, по которым есть продажи
+            # Выгружаем список дистрибьюторов, по которым есть продажи
             all_dists_tab2 = sorted([row[0] for row in conn.execute(
                 "SELECT DISTINCT distributor_name FROM raw_sales WHERE distributor_name IS NOT NULL").fetchall()])
 
-            # ДОБАВЛЕНО: Разбиваем фильтры на 3 колонки
+            # Разбиваем фильтры на 3 колонки
             c1, c2, c3 = st.columns(3)
             selected_periods = c1.multiselect("Фильтр по месяцам:", all_periods, default=all_periods)
             selected_dists_tab2 = c2.multiselect("Фильтр по дистрибьюторам:", all_dists_tab2,
                                                  default=all_dists_tab2)
             selected_wps = c3.multiselect("Фильтр по рабочим местам:", all_wps, default=all_wps)
 
-            # Проверяем, что выбраны и месяцы, и дистрибьюторы
             if selected_periods and selected_dists_tab2:
                 p_placeholders = ', '.join(['?'] * len(selected_periods))
                 d_placeholders = ', '.join(['?'] * len(selected_dists_tab2))
 
+                # SQL-запрос суммирует продажи одинаковых препаратов в одной аптеке (SUM(rs.amount))
                 query = f"""
                 SELECT 
-                    rs.period, rs.amount, rs.inn,
+                    rs.period, SUM(rs.amount) as amount, rs.inn,
                     dd.unified_name as district,
                     pd.unified_name as product, pd.product_line,
                     IFNULL(mpt.pharmacy_type, 1) as ptype,
@@ -390,8 +388,8 @@ else:
                 LEFT JOIN pharmacies ph ON rs.inn = ph.inn
                 WHERE rs.period IN ({p_placeholders})
                   AND rs.distributor_name IN ({d_placeholders}) 
+                GROUP BY rs.period, rs.inn, dd.unified_name, pd.unified_name, pd.product_line, ptype, pharm_name
                 """
-                # Передаем параметры обоих фильтров в запрос
                 params = tuple(selected_periods) + tuple(selected_dists_tab2)
                 df_raw = pd.read_sql(query, conn, params=params)
 
@@ -413,7 +411,8 @@ else:
 
                     for _, row in df_raw.iterrows():
                         period, amt, inn = row['period'], row['amount'], row['inn']
-                        dist, prod, pline, ptype = row['district'], row['product'], row['product_line'], row['ptype']
+                        dist, prod, pline, ptype = row['district'], row['product'], row['product_line'], row[
+                            'ptype']
                         ph_name = row['pharm_name']
 
                         wps = pharm_wps_dict.get((inn, period), [])
@@ -459,12 +458,14 @@ else:
                             else:
                                 sh = shares_dict.get(prod, {'share_line2': 0.5, 'share_line3': 0.5})
                                 if r_l2:
-                                    for w in r_l2: split_row(w['workplace_id'], sh.get('share_line2', 0.5) / len(r_l2))
+                                    for w in r_l2: split_row(w['workplace_id'],
+                                                             sh.get('share_line2', 0.5) / len(r_l2))
                                 else:
                                     split_row('empty WP', sh.get('share_line2', 0.5))
 
                                 if r_l3:
-                                    for w in r_l3: split_row(w['workplace_id'], sh.get('share_line3', 0.5) / len(r_l3))
+                                    for w in r_l3: split_row(w['workplace_id'],
+                                                             sh.get('share_line3', 0.5) / len(r_l3))
                                 else:
                                     split_row('empty WP', sh.get('share_line3', 0.5))
 
@@ -472,8 +473,16 @@ else:
                             direct_wp = next((w for w in wps if w['rep_line'] == pline), None)
                             add_row(direct_wp['workplace_id'] if direct_wp else 'Без линии')
 
-                    df_flat = pd.DataFrame(dist_data, columns=['Период', 'Город/Район', 'ИНН Аптеки', 'Название Аптеки',
-                                                               'Препарат', 'Линия', 'Рабочее место', 'Сумма'])
+                    df_flat = pd.DataFrame(dist_data,
+                                           columns=['Период', 'Город/Район', 'ИНН Аптеки', 'Название Аптеки',
+                                                    'Препарат', 'Линия', 'Рабочее место', 'Сумма'])
+
+                    # Страховочная группировка дублей после распределения долей
+                    df_flat = df_flat.groupby(
+                        ['Период', 'Город/Район', 'ИНН Аптеки', 'Название Аптеки', 'Препарат', 'Линия',
+                         'Рабочее место'], as_index=False)['Сумма'].sum()
+
+                    # Применяем фильтр по рабочим местам
                     df_flat = df_flat[df_flat['Рабочее место'].isin(selected_wps)]
 
                     st.dataframe(df_flat, use_container_width=True)
@@ -977,19 +986,21 @@ else:
 
                 st.write("---")
 
+                # --- СРЕДНИЙ РЯД: Динамика и Линии ---
+                import altair as alt
+
+                # ИСПРАВЛЕНО: Теперь колонки делятся ровно пополам
                 c1, c2 = st.columns(2)
+
                 with c1:
                     st.write("**📈 Динамика продаж по месяцам**")
                     if not df_filtered.empty:
                         dyn_df = df_filtered.groupby('period')['amount'].sum().reset_index()
 
-                        # ДОБАВЛЕНО: Плавный график через встроенную библиотеку Altair
-                        import altair as alt
-
                         chart = alt.Chart(dyn_df).mark_line(
-                            interpolate='monotone',  # Делает линии плавными (сглаженными)
-                            point=True,  # Оставляет точки для точных значений
-                            strokeWidth=3  # Делает линию чуть толще и красивее
+                            interpolate='monotone',
+                            point=True,
+                            strokeWidth=3
                         ).encode(
                             x=alt.X('period', title=''),
                             y=alt.Y('amount', title='')
@@ -999,16 +1010,27 @@ else:
                         st.info("Нет данных")
 
                 with c2:
-                    st.write("**📊 Продажи по линиям препаратов**")
+                    st.write("**📊 По линиям**")
                     if not df_filtered.empty:
-                        line_df = df_filtered.groupby('product_line')['amount'].sum().reset_index().set_index(
-                            'product_line')
-                        st.bar_chart(line_df, use_container_width=True)
+                        line_df = df_filtered.groupby('product_line')['amount'].sum().reset_index()
+
+                        pie_chart = alt.Chart(line_df).mark_arc().encode(
+                            theta=alt.Theta(field="amount", type="quantitative"),
+                            color=alt.Color(field="product_line", type="nominal", title="Линия",
+                                            legend=alt.Legend(orient="bottom")),
+                            tooltip=[
+                                alt.Tooltip(field="product_line", type="nominal", title="Линия:"),
+                                alt.Tooltip(field="amount", type="quantitative", title="Продажи:", format=",.0f")
+                            ]
+                        ).properties(height=350)
+
+                        st.altair_chart(pie_chart, use_container_width=True)
                     else:
                         st.info("Нет данных")
 
                 st.write("---")
 
+                # --- НИЖНИЙ РЯД 1: Топ аптек и Топ сотрудников ---
                 c3, c4 = st.columns(2)
                 with c3:
                     st.write("**🏆 Топ-10 аптек по объему продаж**")
@@ -1027,28 +1049,51 @@ else:
                     prods_str = "','".join(safe_products)
 
                     df_wp = pd.read_sql(f"""
-                        SELECT 
-                            w.workplace_id as 'Рабочее место',
-                            SUM(rs.amount * 1.0 / c.wp_count) as 'Объем продаж'
-                        FROM raw_sales rs
-                        JOIN monthly_pharmacy_workplaces w 
-                            ON rs.inn = w.inn AND rs.period = w.period
-                        JOIN (
-                            SELECT inn, period, COUNT(workplace_id) as wp_count
-                            FROM monthly_pharmacy_workplaces
-                            GROUP BY inn, period
-                        ) c ON w.inn = c.inn AND w.period = c.period
-                        LEFT JOIN product_dictionary pd ON rs.product_id = pd.id
-                        WHERE rs.period IN ('{periods_str}')
-                          AND rs.distributor_name IN ('{dists_str}')
-                          AND IFNULL(pd.original_name, 'Неизвестный препарат') IN ('{prods_str}')
-                        GROUP BY w.workplace_id
-                        ORDER BY 'Объем продаж' DESC
-                        LIMIT 10
-                    """, conn)
+                                        SELECT 
+                                            w.workplace_id as 'Рабочее место',
+                                            SUM(rs.amount * 1.0 / c.wp_count) as 'Объем продаж'
+                                        FROM raw_sales rs
+                                        JOIN monthly_pharmacy_workplaces w 
+                                            ON rs.inn = w.inn AND rs.period = w.period
+                                        JOIN (
+                                            SELECT inn, period, COUNT(workplace_id) as wp_count
+                                            FROM monthly_pharmacy_workplaces
+                                            GROUP BY inn, period
+                                        ) c ON w.inn = c.inn AND w.period = c.period
+                                        LEFT JOIN product_dictionary pd ON rs.product_id = pd.id
+                                        WHERE rs.period IN ('{periods_str}')
+                                          AND rs.distributor_name IN ('{dists_str}')
+                                          AND IFNULL(pd.original_name, 'Неизвестный препарат') IN ('{prods_str}')
+                                        GROUP BY w.workplace_id
+                                        ORDER BY 'Объем продаж' DESC
+                                        LIMIT 10
+                                    """, conn)
 
                     if not df_wp.empty:
                         df_wp = df_wp.set_index('Рабочее место')
                         st.bar_chart(df_wp, use_container_width=True)
                     else:
                         st.info("Нет данных о привязках к рабочим местам по этим критериям.")
+
+                st.write("---")
+
+                # --- НИЖНИЙ РЯД 2: Дистрибьюторы ---
+                c5, c6 = st.columns(2)
+                with c5:
+                    st.write("**🏢 По дистрибьюторам**")
+                    if not df_filtered.empty:
+                        dist_df = df_filtered.groupby('distributor_name')['amount'].sum().reset_index()
+
+                        dist_chart = alt.Chart(dist_df).mark_arc().encode(
+                            theta=alt.Theta(field="amount", type="quantitative"),
+                            color=alt.Color(field="distributor_name", type="nominal", title="Дистрибьютор",
+                                            legend=alt.Legend(orient="bottom")),
+                            tooltip=[
+                                alt.Tooltip(field="distributor_name", type="nominal", title="Дистрибьютор:"),
+                                alt.Tooltip(field="amount", type="quantitative", title="Продажи:", format=",.0f")
+                            ]
+                        ).properties(height=350)
+
+                        st.altair_chart(dist_chart, use_container_width=True)
+                    else:
+                        st.info("Нет данных")
